@@ -3,15 +3,20 @@
 [![CI](https://github.com/lokesh75-kank/agenteval/actions/workflows/ci.yml/badge.svg)](https://github.com/lokesh75-kank/agenteval/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/agenteval-core.svg)](https://www.npmjs.com/package/agenteval-core)
 [![npm downloads](https://img.shields.io/npm/dm/agenteval-core.svg)](https://www.npmjs.com/package/agenteval-core)
+[![PyPI](https://img.shields.io/pypi/v/agenteval-python.svg)](https://pypi.org/project/agenteval-python/)
+[![PyPI downloads](https://static.pepy.tech/badge/agenteval-python)](https://pepy.tech/project/agenteval-python)
+[![docs](https://img.shields.io/badge/docs-lokesh75--kank.github.io%2Fagenteval-blue)](https://lokesh75-kank.github.io/agenteval/)
+
+**Documentation: [lokesh75-kank.github.io/agenteval](https://lokesh75-kank.github.io/agenteval/)** - getting started, concepts, assertion and config references.
 [![license](https://img.shields.io/npm/l/agenteval-core.svg)](./LICENSE)
 
 **Reliability and audit-ready testing for LLM agents.** Wrap any agent, run each scenario N times, and get a determinism (flakiness) score, grounding checks, and a self-contained **audit-ready HTML report** your QA or compliance team can attach to records.
 
-Your agent can pass a demo 10 times and still be flaky in production. In [a real case study](./case-studies/aaro-property-tax/), an autonomous web agent given the *same task four times* succeeded once - **25% determinism**. A single hand-check would have called it working. AgentEval exists to catch exactly that.
+Your agent can pass a demo 10 times and still be flaky in production. In [a real case study](./case-studies/web-agent-property-tax/), an autonomous web agent given the *same task four times* succeeded once - **25% determinism**. A single hand-check would have called it working. AgentEval exists to catch exactly that.
 
 ![AgentEval audit report: verdict banner, determinism scores, and a flaky scenario caught at 33%](./docs/assets/report-screenshot.png)
 
-> Status: v0.1. AgentEval grew out of the evaluation layer of **Deminn**, a multi-agent system for regulated quality and compliance workflows (CAPA, FDA/ISO), generalized to evaluate any LLM agent.
+> Status: v0.3, on [npm](https://www.npmjs.com/package/agenteval-core) (engine) and [PyPI](https://pypi.org/project/agenteval-python/) (Python bridge). AgentEval grew out of the evaluation layer of **Deminn**, a multi-agent system for regulated quality and compliance workflows (CAPA, FDA/ISO), generalized to evaluate any LLM agent.
 
 ---
 
@@ -39,7 +44,7 @@ Most eval tools score *answer accuracy*. AgentEval is the **reliability and audi
 | Regression gate for CI (`check` vs baseline) | ✅ | ✅ | ✅ | partial |
 | Evaluate existing traces (OpenTelemetry, LangSmith) | ✅ | - | - | native |
 | MCP server (callable by coding agents) | ✅ | - | - | - |
-| Language | TypeScript | Python | Node/CLI | platform |
+| Language | TypeScript + Python bridge | Python | Node/CLI | platform |
 
 If you need battle-tested accuracy metrics and a big integration catalog, DeepEval and promptfoo are excellent - this table is about *fit*, not better/worse. AgentEval is the one to reach for when the question is "will this agent behave the same way tomorrow, and can I show an auditor the evidence?"
 
@@ -48,13 +53,14 @@ If you need battle-tested accuracy metrics and a big integration catalog, DeepEv
 ```bash
 npm install agenteval-core
 # or: pnpm add agenteval-core
+# Python users: pip install agenteval-python   (see "Python" below)
 ```
 
 LLM provider SDKs (`@anthropic-ai/sdk`, `@google/genai`) and the MCP SDK are **optional** - install them only if you use the LLM-judge or the MCP server.
 
 ## Quickstart (your own agent)
 
-**1. Wrap your agent in an adapter** (the only integration point - any framework, any language behind an HTTP call):
+**1. Wrap your agent in an adapter** (the only integration point - JS code as below, a subprocess in any language via `{ command, args }`, or Python with the [`agenteval-python`](#python) decorator):
 
 ```ts
 import { defineAdapter } from 'agenteval-core';
@@ -113,13 +119,52 @@ A fully runnable version of this lives in [`examples/basic-agent/`](./examples/b
 ```bash
 npx agenteval init          # scaffold agenteval.config.mjs + an example scenario
 npx agenteval init --demo   # scaffold a working demo agent (no API keys needed)
+npx agenteval init --demo-python   # same demo as a Python agent + YAML config
 npx agenteval run           # run scenarios, print a scorecard
 npx agenteval run --html report.html   # also write the audit report
 npx agenteval baseline      # save a known-good snapshot
 npx agenteval check         # fail (exit 1) if results regressed vs the baseline  <- wire into CI
+npx agenteval eval --traces traces.json ./scenarios   # score pre-recorded traces, no agent run
 ```
 
-The CLI loads `agenteval.config.mjs`, which default-exports your `adapter` and options.
+The CLI loads `agenteval.config.mjs` (or a declarative `agenteval.config.yaml` - see "Python" below), which provides your `adapter` and options. An adapter is either JS code (`{ run }`) or a subprocess in any language (`{ command, args }`).
+
+## Python
+
+Your agent doesn't have to be JavaScript. `pip install agenteval-python` gives Python users the same CLI plus a ~10-line integration - the engine runs the agent as a subprocess (JSON in on stdin, an `AgentTrace` out on stdout):
+
+```python
+# my_agent.py
+import agenteval
+
+@agenteval.adapter
+def my_agent(input):
+    result = run_my_agent(input["user_message"])  # LangGraph, CrewAI, raw loop, ...
+    return agenteval.Trace(
+        final_text=result.text,
+        tool_calls=[agenteval.ToolCall(name=t.name, input=t.args) for t in result.tools],
+    )
+
+if __name__ == "__main__":
+    my_agent.serve()
+```
+
+```yaml
+# agenteval.config.yaml
+adapter:
+  command: python3
+  args: [my_agent.py]
+scenarios: ./scenarios
+runs: 3
+```
+
+```bash
+pip install agenteval-python   # requires Node.js >= 20 on PATH (the engine)
+agenteval init --demo-python   # working Python demo, no API keys
+agenteval run --html report.html
+```
+
+Or skip running the agent entirely: dump traces you already collect with `agenteval.write_traces(...)` and score them with `agenteval eval --traces traces.json ./scenarios` (`--format otel | langsmith` for OpenTelemetry / LangSmith exports). See [`python/README.md`](./python/README.md).
 
 ## Assertions
 
@@ -164,6 +209,8 @@ import { langgraphToTrace, langsmithToTrace, otelToTrace } from 'agenteval-core'
 const trace = langgraphToTrace(myLangGraphRun);
 ```
 
+Or from the CLI, with no code at all: `agenteval eval --traces traces.json ./scenarios --format otel` scores a JSON file of recorded runs against your scenarios (each scenario replays as many runs as it has matching traces, so determinism is measured from what you actually collected).
+
 Adapters exist for **OpenTelemetry GenAI** spans, **LangSmith** runs, and **LangGraph** streamed updates or checkpoint histories. Want another format (OpenHands, AutoGen, ...)? Adapters are small, pure functions - see [CONTRIBUTING.md](./CONTRIBUTING.md#adding-an-ingest-adapter), contributions welcome.
 
 ## MCP server
@@ -178,9 +225,10 @@ See [AGENTS.md](./AGENTS.md) for the canonical integration pattern (written for 
 
 ## Case study
 
-[**A real autonomous web agent at 25% determinism**](./case-studies/aaro-property-tax/) - AgentEval
+[**A real autonomous web agent at 25% determinism**](./case-studies/web-agent-property-tax/) - AgentEval
 evaluating four real recorded runs of an autonomous browser agent on the same task; it succeeded only
-1 of 4 times, with three distinct failure modes. Reproducible: `npx tsx case-studies/aaro-property-tax/evaluate.ts`.
+1 of 4 times, with three distinct failure modes. Reproducible: `npx tsx case-studies/web-agent-property-tax/evaluate.ts`.
+Full writeup: [Your agent passed the demo. Would it pass it again?](./docs/case-studies/25-percent-determinism.md)
 
 ## Benchmark
 
@@ -194,6 +242,17 @@ Near-term direction, tracked in issues:
 - [More LLM-judge providers + an offline/heuristic judge](https://github.com/lokesh75-kank/agenteval/issues/4)
 - [Improve grounding precision](https://github.com/lokesh75-kank/agenteval/issues/5)
 - More ingest adapters (OpenHands, AutoGen) - [good first issues](https://github.com/lokesh75-kank/agenteval/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+
+## Contributing
+
+Contributions land via pull request (`main` is protected; CI must pass and a
+maintainer reviews). Start with [CONTRIBUTING.md](./CONTRIBUTING.md) - ingest
+adapters are the best first contribution. Security reports go through
+[private vulnerability reporting](./SECURITY.md), not public issues. All
+participation is covered by the [Code of Conduct](./CODE_OF_CONDUCT.md).
+
+Releases ship from CI via trusted publishing on both registries: see the
+[CHANGELOG](./CHANGELOG.md) and [GitHub Releases](https://github.com/lokesh75-kank/agenteval/releases).
 
 ## License
 

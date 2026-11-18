@@ -1,0 +1,122 @@
+name: Release
+
+# Publishes both packages via trusted publishing (OIDC) - no stored tokens.
+#
+#   tag v<version>     -> npm  (agenteval-core, the engine)
+#   tag py-v<version>  -> PyPI (agenteval-python, the Python bridge)
+#
+# Flow: version-bump PR (package.json or python/pyproject.toml + CHANGELOG)
+# is merged to main, then a maintainer pushes the matching tag. Each job
+# verifies the tag matches the manifest version, runs tests, publishes, and
+# creates a GitHub Release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'py-v*'
+
+jobs:
+  # ── npm: agenteval-core ──
+  publish-npm:
+    if: ${{ !startsWith(github.ref_name, 'py-v') }}
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write # npm trusted publishing (OIDC) + provenance
+      contents: write # GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing requires npm >= 11.5.1
+      - run: npm install -g npm@latest && npm --version
+
+      - name: Check tag matches package.json version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME ($TAG_VERSION) != package.json version ($PKG_VERSION)" >&2
+            exit 1
+          fi
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck && pnpm lint && pnpm test
+
+      # prepublishOnly runs pnpm build; OIDC handles auth, no NODE_AUTH_TOKEN
+      - run: npm publish
+
+      - name: Create GitHub Release
+        run: gh release create "$GITHUB_REF_NAME" --title "agenteval-core $GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # ── PyPI: agenteval-python ──
+  build-python:
+    if: ${{ startsWith(github.ref_name, 'py-v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check tag matches pyproject version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#py-v}"
+          PKG_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('python/pyproject.toml','rb'))['project']['version'])")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME ($TAG_VERSION) != pyproject.toml version ($PKG_VERSION)" >&2
+            exit 1
+          fi
+
+      - name: Run Python tests
+        run: |
+          pip install -e ./python pytest
+          pytest python/tests -q
+
+      - name: Build sdist and wheel
+        run: |
+          pip install build
+          python -m build python/ --outdir dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+
+  publish-pypi:
+    if: ${{ startsWith(github.ref_name, 'py-v') }}
+    needs: build-python
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # PyPI trusted publishing (OIDC)
+      contents: write # GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+      - name: Create GitHub Release
+        run: gh release create "$GITHUB_REF_NAME" --title "agenteval-python $GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -4,6 +4,51 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-08-31
+
+### Changed
+- Refreshed the agent-facing docs shipped in the package: `llms.txt` and
+  `AGENTS.md` now cover the Python bridge (`agenteval-python`), the subprocess
+  command adapter, YAML config, and `eval --traces`, with an integration-path
+  chooser for AI coding assistants.
+- README: current status/badges, subprocess and Python adapter paths,
+  contributing section, and a link to the new case-study writeup
+  (`docs/case-studies/25-percent-determinism.md`).
+
+## [0.3.1] - 2026-08-31
+
+### Changed
+- Cleaned `bin` paths in package.json (npm publish warning).
+- Releases now publish from CI via trusted publishing (OIDC + provenance)
+  for both npm and PyPI; every release gets a GitHub Release. First npm
+  release through the automated pipeline.
+
+## [0.3.0] - 2026-08-31
+
+The Python-bridge release: the engine becomes language-agnostic and the
+`agenteval-python` package ships to PyPI (its own versions start at 0.1.0).
+
+### Added
+- **Command adapter**: run any agent, in any language, as a subprocess.
+  `adapter: { command, args }` in the config; the engine writes `AgentInput`
+  JSON to stdin and reads an `AgentTrace` back from stdout. Failures (bad
+  JSON, non-zero exit, spawn error, timeout) become errored runs, not crashes.
+- **Declarative YAML config**: `agenteval.config.yaml` as an alternative to
+  `agenteval.config.mjs` for command-adapter setups; no JS required.
+- **`agenteval eval --traces <file>`**: score pre-recorded traces with no
+  agent run (`--format traces | otel | langsmith`). Each scenario replays as
+  many runs as it has matching traces, so determinism is measured from what
+  was actually collected. A config without an adapter is valid here.
+- **Replay adapter** (`replayAdapter`, `replayRunCount`) exported for doing
+  the same from code.
+- **`agenteval init --demo-python`**: scaffolds a working Python demo agent
+  (round-robin flaky, like the JS demo) plus a YAML config.
+- **Python package** (`python/`, published as `agenteval-python`): the
+  `agenteval` CLI as a passthrough to the pinned npm engine via npx, an
+  `@agenteval.adapter` decorator speaking the subprocess protocol, `Trace` /
+  `ToolCall` / `Citation` dataclasses, and `write_traces()`.
+- CI: `python-bridge` job running the Python demo end to end.
+
 ## [0.2.0] - 2026-08-08
 
 ### Added
@@ -25,7 +70,7 @@ All notable changes to this project are documented here. The format follows
 ## [0.1.1] - 2026-06-21
 
 ### Added
-- `case-studies/aaro-property-tax/` - real-agent validation: four recorded runs
+- `case-studies/web-agent-property-tax/` - real-agent validation: four recorded runs
   of an autonomous web agent on the same task scored at 25% determinism (1/4).
 - `CHANGELOG.md` and `CONTRIBUTING.md`.
 
@@ -53,4 +98,8 @@ Initial public release.
 - **MCP server**: `evaluate_agent`, `check_grounding`, `get_report` tools.
 - **Benchmark**: starter regulated scenario set from public-domain US regulatory text (eCFR/FDA).
 
+[0.3.2]: https://github.com/lokesh75-kank/agenteval/releases/tag/v0.3.2
+[0.3.1]: https://github.com/lokesh75-kank/agenteval/releases/tag/v0.3.1
+[0.3.0]: https://github.com/lokesh75-kank/agenteval/compare/v0.1.1...v0.3.1
+[0.2.0]: https://github.com/lokesh75-kank/agenteval/compare/v0.1.1...v0.3.1
 [0.1.1]: https://github.com/lokesh75-kank/agenteval/releases/tag/v0.1.1
