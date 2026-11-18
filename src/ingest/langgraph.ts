@@ -118,41 +118,79 @@ function isMessage(v: AnyObj): boolean {
   return false;
 }
 
-function messageKey(msg: AnyObj): string {
-  const body = messageBody(msg);
-  return [
-    str(pick(body, 'id')) ?? '',
-    roleOf(msg) ?? '',
-    str(pick(body, 'name', 'tool_call_id', 'toolCallId')) ?? '',
-    asText(body.content).slice(0, 160),
-    String(toolCallsOf(msg).length),
-  ].join('\0');
-}
-
+// Only inspect documented envelopes. Tool arguments and message content are opaque.
 function collectMessages(raw: unknown): AnyObj[] {
   const out: AnyObj[] = [];
-  const seenObjects = new WeakSet<object>();
-  const seenMessages = new Set<string>();
+  const byId = new Map<string, number>();
+  const seen = new WeakSet<object>();
 
-  function visit(v: unknown): void {
-    if (Array.isArray(v)) {
-      for (const item of v) visit(item);
-      return;
+  function add(msg: AnyObj): void {
+    const id = str(messageBody(msg).id);
+    const previous = id ? byId.get(id) : undefined;
+    if (previous !== undefined) out[previous] = msg;
+    else {
+      if (id) byId.set(id, out.length);
+      out.push(msg);
     }
-    if (!isObject(v) || seenObjects.has(v)) return;
-    seenObjects.add(v);
-
-    if (isMessage(v)) {
-      const key = messageKey(v);
-      if (!seenMessages.has(key)) {
-        seenMessages.add(key);
-        out.push(v);
-      }
-    }
-
-    for (const value of Object.values(v)) visit(value);
   }
 
+  function snapshot(messages: unknown): void {
+    if (!Array.isArray(messages)) return;
+    const items = messages.filter((m): m is AnyObj => isObject(m) && isMessage(m));
+    // Snapshot histories repeat an ordered prefix, including messages without IDs.
+    // Compare full messages, not text prefixes or the number of tool calls.
+    let shared = 0;
+    while (shared < items.length && shared < out.length &&
+      JSON.stringify(items[shared]) === JSON.stringify(out[shared])) shared++;
+    for (const msg of items.slice(shared)) add(msg);
+  }
+
+  function visit(v: unknown, isSnapshot = false): void {
+    if (!v || typeof v !== 'object' || seen.has(v)) return;
+    seen.add(v);
+    if (Array.isArray(v)) {
+      for (const item of v) visit(item, isSnapshot);
+      return;
+    }
+    if (!isObject(v)) return;
+    if (isMessage(v)) { add(v); return; }
+    if (typeof v.event === 'string') {
+      const data = isObject(v.data) ? v.data : {};
+      if (v.event === 'on_tool_end') {
+        const output = data.output;
+        if (isObject(output) && roleOf(output) === 'tool') add(output);
+        else add({ type: 'tool', name: v.name, tool_call_id: data.tool_call_id,
+          content: output, input: data.input });
+      } else if (v.event === 'on_chat_model_end' || v.event === 'on_llm_end') {
+        const output = data.output;
+        if (isObject(output) && isMessage(output)) add(output);
+        else add({ type: 'ai', content: asText(output) });
+      } else if (v.event === 'on_chain_start' && isObject(data.input)) {
+        snapshot(data.input.messages);
+      }
+      return;
+    }
+    if (Array.isArray(v.messages)) {
+      if (isSnapshot) snapshot(v.messages);
+      else for (const msg of v.messages) visit(msg);
+      return;
+    }
+    if (Array.isArray(v.checkpoints)) {
+      const checkpoints = [...v.checkpoints];
+      if (checkpoints.every(c => isObject(c) && typeof c.created_at === 'string')) {
+        checkpoints.sort((a, b) => String((a as AnyObj).created_at).localeCompare(String((b as AnyObj).created_at)));
+      }
+      for (const checkpoint of checkpoints) visit(checkpoint, true);
+      return;
+    }
+    if (isObject(v.values)) { visit(v.values, true); return; }
+    if (Array.isArray(v.updates)) { visit(v.updates); return; }
+    if (Array.isArray(v.events)) { visit(v.events); return; }
+    // Streamed node updates are { nodeName: { messages: [...] } }.
+    for (const value of Object.values(v)) {
+      if (isObject(value) && Array.isArray(value.messages)) visit(value, isSnapshot);
+    }
+  }
   visit(raw);
   return out;
 }
@@ -255,7 +293,7 @@ function traceFromMessages(messages: AnyObj[]): AgentTrace | undefined {
       if (call) {
         call.output = output;
       } else {
-        toolCalls.push({ name: str(pick(body, 'name')) ?? 'tool', input: {}, output });
+        toolCalls.push({ name: str(pick(body, 'name')) ?? 'tool', input: argObject(body.input), output });
       }
     }
 
@@ -273,60 +311,7 @@ function traceFromMessages(messages: AnyObj[]): AgentTrace | undefined {
   return trace;
 }
 
-function traceFromEvents(events: AnyObj[]): AgentTrace {
-  let finalText = '';
-  const toolCalls: ToolCall[] = [];
-
-  for (const ev of events) {
-    const name = str(ev.name) ?? 'tool';
-    const event = str(ev.event)?.toLowerCase() ?? '';
-    const data = isObject(ev.data) ? ev.data : {};
-
-    if (event.includes('tool') && event.endsWith('_end')) {
-      toolCalls.push({
-        name,
-        input: argObject(data.input),
-        output: maybeParse(data.output),
-      });
-      continue;
-    }
-
-    if ((event.includes('chat_model') || event.includes('llm')) && event.endsWith('_end')) {
-      const output = data.output;
-      const text = isObject(output) ? asText(output.content ?? output.text) : asText(output);
-      if (text) finalText = text;
-    }
-  }
-
-  return { input: { user_message: '' }, finalText, toolCalls };
-}
-
-function collectEvents(raw: unknown): AnyObj[] {
-  const out: AnyObj[] = [];
-  const seenObjects = new WeakSet<object>();
-
-  function visit(v: unknown): void {
-    if (Array.isArray(v)) {
-      for (const item of v) visit(item);
-      return;
-    }
-    if (!isObject(v) || seenObjects.has(v)) return;
-    seenObjects.add(v);
-
-    if (typeof v.event === 'string' && isObject(v.data)) out.push(v);
-    for (const value of Object.values(v)) visit(value);
-  }
-
-  visit(raw);
-  return out;
-}
-
 export function langgraphToTrace(raw: unknown): AgentTrace {
-  const fromMessages = traceFromMessages(collectMessages(raw));
-  if (fromMessages) return fromMessages;
-
-  const events = collectEvents(raw);
-  if (events.length > 0) return traceFromEvents(events);
-
-  return { input: { user_message: '' }, finalText: '', toolCalls: [] };
+  return traceFromMessages(collectMessages(raw)) ??
+    { input: { user_message: '' }, finalText: '', toolCalls: [] };
 }

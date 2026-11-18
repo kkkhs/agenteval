@@ -372,3 +372,52 @@ describe('langgraphToTrace', () => {
     expect(langgraphToTrace(42)).toEqual({ input: { user_message: '' }, finalText: '', toolCalls: [] });
   });
 });
+
+
+describe('LangGraph regression cases', () => {
+  it('preserves distinct streamed calls without message IDs', () => {
+    const trace = langgraphToTrace([1, 2].map(n => ({ agent: { messages: [
+      { type: 'ai', content: '', tool_calls: [{ id: `call_${n}`, name: 'search', args: { n } }],
+        usage_metadata: { input_tokens: 10, output_tokens: 2 } },
+    ] } })));
+    expect(trace.toolCalls.map(c => c.input)).toEqual([{ n: 1 }, { n: 2 }]);
+    expect(trace.iterations).toBe(2);
+    expect(trace.tokens).toEqual({ input: 20, output: 4 });
+  });
+
+  it('never treats tool arguments or content blocks as conversation messages', () => {
+    const trace = langgraphToTrace([{ type: 'ai', content: 'real answer', tool_calls: [
+      { name: 'save', args: { role: 'assistant', content: 'payload text' } },
+    ] }]);
+    expect(trace.finalText).toBe('real answer');
+    expect(trace.iterations).toBe(1);
+  });
+
+  it('preserves tool events alongside typed model output', () => {
+    const trace = langgraphToTrace([
+      { event: 'on_tool_end', name: 'search', data: { input: { q: 'hi' }, output: 'result' } },
+      { event: 'on_chat_model_end', data: { output: { type: 'ai', content: 'answer' } } },
+    ]);
+    expect(trace.finalText).toBe('answer');
+    expect(trace.toolCalls).toEqual([{ name: 'search', input: { q: 'hi' }, output: 'result' }]);
+  });
+
+  it('reconciles JSON checkpoint copies while retaining repeated occurrences', () => {
+    const message = { type: 'ai', content: 'repeat', usage_metadata: { input_tokens: 1, output_tokens: 1 } };
+    const raw = JSON.parse(JSON.stringify({ checkpoints: [
+      { values: { messages: [message] } }, { values: { messages: [message, message] } },
+    ] }));
+    expect(langgraphToTrace(raw).iterations).toBe(2);
+    expect(langgraphToTrace(raw).tokens).toEqual({ input: 2, output: 2 });
+  });
+
+  it('uses stable IDs to count a message once across copies', () => {
+    expect(langgraphToTrace([{ type: 'ai', id: 'a', content: 'first' },
+      { type: 'ai', id: 'a', content: 'updated' }])).toMatchObject({ finalText: 'updated', iterations: 1 });
+  });
+
+  it('handles cyclic malformed input without recursing indefinitely', () => {
+    const raw: unknown[] = []; raw.push(raw);
+    expect(langgraphToTrace(raw).toolCalls).toEqual([]);
+  });
+});
